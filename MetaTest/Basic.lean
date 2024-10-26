@@ -87,19 +87,16 @@ elab "getInfo" cmd:command : command => do
   match cmd.raw.find? (·.isOfKind ``Lean.Parser.Tactic.rwSeq) with
     | some nm =>
       let rw_seq := nm[2][1].getArgs.filter (·.isOfKind ``Lean.Parser.Tactic.rwRule)
-      -- let nm := nm.setArg 2 $ nm[2].setArg 1 (nm[2][1].setArg 0 nm[2][1][2])
+      let nm := nm.setArg 2 $ nm[2].setArg 1 (nm[2][1].setArgs #[rw_seq[2]!])
       -- let nm := nm.setArg 2 $ nm[2][1].setArgs (#[nm[2][1][0]])
-      let nm :=  rw [abs]
-      logInfo m!"The tactic sequence is '{nm}'."
+      -- let nm :=  rw [abs]
+      let testrule := TSyntax.mk rw_seq[1]!
+      let nm1 ← `(tactic | rw [$testrule: term])
+      let new := nm1.raw
+
+      logInfo m!"The tactic sequence is '{new}'."
     | none => logInfo m!"No given name."
 
-def split_rw (stx : Syntax) : Syntax := Id.run do
-  let mut newStx := #[]
-  for rwRule in stx[1].getArgs do
-    let rwRule := rwRule[1]
-    let rwRule := rwRule.setArg 1 $ mkAtom "⬝"
-    newStx := newStx.setArg 1 $ newStx[1].setArg 0 rwRule
-  newStx
 
 set_option pp.rawOnError true
 
