@@ -28,81 +28,90 @@ theorem gaussSum_mulShift1 (χ : MulChar R R') (ψ : AddChar R R') (a : Rˣ) :
   simp_rw [← mul_assoc, ← map_mul]
   exact Fintype.sum_bijective _ a.mulLeft_bijective _ _ fun x ↦ rfl
 
+/-- Replacing `ψ` by `mulShift ψ a` and multiplying the Gauss sum by `χ a` does not change it. -/
+theorem gaussSum_mulShift2 (χ : MulChar R R') (ψ : AddChar R R') (a : Rˣ) :
+    χ a * gaussSum χ (AddChar.mulShift ψ a) = gaussSum χ ψ := by
+  simp only [gaussSum, AddChar.mulShift_apply, Finset.mul_sum]
+  simp_rw [← mul_assoc, ← map_mul]
+  -- apply Fintype.sum_bijective
+  -- pick_goal 3
+  -- exact fun x ↦ x
+
+  exact Fintype.sum_bijective _ a.mulLeft_bijective _ _ fun x ↦ rfl
+
 
 #check cube_of_not_dvd
--- open Lean.Elab.Tactic
 
 
-def parseExpr (v : Expr) : CommandElabM Unit := do
-  match v with
-  | const _ _ => pure ()
-    -- logInfo s!"const {v}"
-  | Expr.mdata md v' =>
-    logInfo s!"Transformed proof:\n{md}"
-    parseExpr v'
-  | Expr.app f a => do
-    parseExpr f
-    parseExpr a
-    -- logInfo s!"{a}"
-  | Expr.lam _ l1 l2 _ => do
-    parseExpr l1
-    parseExpr l2
-  | lit _ => pure ()
-  | proj _ _ s =>
-    parseExpr s
-  | info =>
-    logInfo s!"{info}"
+namespace Lean.Syntax
+
+def setArgr (stx: Syntax) (locs: List ℕ) (arg: Syntax) : Syntax :=
+  match locs with
+  | .nil => arg
+  | .cons i it => stx.setArg i $ stx[i].setArgr it arg
 
 
-def decompose_rw (thm_name : Name) : CommandElabM Unit := do
-  let scope ← getScope
-  let info := toString scope.header
-  let env ← getEnv
-  let info := env.constants.find? thm_name
-  -- let info := scope.varDecls
-  -- logInfo s!"{info}"
-  match info with
-  | none => throwError "Theorem '{thm_name}' not found"
-  | some aa =>
-    let value := aa.value!
-    logInfo s!"{value}"
-    parseExpr value
+def setArgsr (stx: Syntax) (locs: List ℕ) (args: Array Syntax) : Syntax :=
+  match locs with
+  | .nil => stx.setArgs args
+  | .cons i it => stx.setArg i $ stx[i].setArgsr it args
 
+end Lean.Syntax
 
--- #eval decompose_rw `gaussSum_mulShift1
-open Lean Elab Parser Command
-elab "getName " cmd:command : command => do
+open Lean.Syntax Lean.Parser Lean.Elab
+
+elab "#rwSplitter" cmd:command : command => do
   elabCommand cmd
-  match cmd.raw.find? (·.isOfKind ``declId) with
-    | some nm => logInfo m!"The name is '{nm}'."
-    | none => logInfo m!"No given name."
+  let tactic_seq := cmd.raw[1][3][1][1][0][0].getArgs
+  let tac_sep := tactic_seq[1]!
+  let mut new_seq : Array Syntax := #[]
+  for tac in tactic_seq do
+    if tac.isOfKind ``Tactic.rwSeq then
+      let rw_seq := tac[2][1].getArgs.filter (·.isOfKind ``Tactic.rwRule)
+      for rw_rule in rw_seq do
+        let trule : TSyntax `term := TSyntax.mk rw_rule
+        let testrww ← `(tactic | rw [$trule: term])
+        -- let testrww := testrww.raw.setKind ``Tactic.rwSeq
+        new_seq := (new_seq.push testrww).push tac_sep
+    else if tac == tac_sep then pure ()
+    else new_seq := (new_seq.push tac).push tac_sep
+  new_seq := new_seq.pop
+  let processed := cmd.raw.setArgsr [1,3,1,1,0,0] new_seq
+  logInfo m!"The normalized proof is\n{processed}."
+  -- logInfo m!"The position is {tree}."
 
-elab "getProof" cmd:command : command => do
-  elabCommand cmd
-  let allArgs := cmd.raw[1][3][1][1][0][0][2][2]
-  logInfo m!"The proof is '{allArgs}'."
+elab "#info " c:command : command => do
+  let initInfoTrees ← getResetInfoTrees
+  try
+    elabCommand c
+    let trees ← getInfoTrees
+    for tree in trees do
+      let fm := tree.getCompletionInfos
+      -- logInfo m!"{fm}"
+      logInfo m!"{← tree.format}"
+  finally
+    modify fun st =>
+      { st with infoState := { st.infoState with trees := initInfoTrees ++ st.infoState.trees } }
 
-elab "getInfo" cmd:command : command => do
-  elabCommand cmd
-  match cmd.raw.find? (·.isOfKind ``Lean.Parser.Tactic.rwSeq) with
-    | some nm =>
-      let rw_seq := nm[2][1].getArgs.filter (·.isOfKind ``Lean.Parser.Tactic.rwRule)
-      let nm := nm.setArg 2 $ nm[2].setArg 1 (nm[2][1].setArgs #[rw_seq[2]!])
-      -- let nm := nm.setArg 2 $ nm[2][1].setArgs (#[nm[2][1][0]])
-      -- let nm :=  rw [abs]
-      let testrule := TSyntax.mk rw_seq[1]!
-      let nm1 ← `(tactic | rw [$testrule: term])
-      let new := nm1.raw
 
-      logInfo m!"The tactic sequence is '{new}'."
-    | none => logInfo m!"No given name."
 
 
 set_option pp.rawOnError true
 
-getInfo
+#info
 lemma cube_o2f_not_dvd {n : ℤ} (h : ¬ 3 ∣ n) :
     (n : ZMod 9) ^ 3 = 1 ∨ (n : ZMod 9) ^ 3 = 8 := by
   apply cube_of_castHom_ne_zero
   rw [map_intCast, Ne, ZMod.intCast_zmod_eq_zero_iff_dvd]
+  assumption
+  <;> linarith
+
+
+#info
+lemma cube_o2f_not_dvd1 {n : ℤ} (h : ¬3 ∣ n) : (n : ZMod 9) ^ 3 = 1 ∨ (n : ZMod 9) ^ 3 = 8 :=
+  by
+  apply cube_of_castHom_ne_zero
+  rw [map_intCast]
+  rw [Ne]
+  rw [ZMod.intCast_zmod_eq_zero_iff_dvd]
   assumption
