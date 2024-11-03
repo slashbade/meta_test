@@ -472,7 +472,7 @@ lemma cube_o2f_not_dvd1 {n : ℤ} (h : ¬3 ∣ n) : (n : ZMod 9) ^ 3 = 1 ∨ (n 
   assumption
 
 
-lemma aug (n : ℤ)
+lemma aug1 (n : ℤ)
 (h : ¬3 ∣ n)
 (hg2 : ¬(n : ZMod 3) = 0)
 : (n : ZMod 3) ≠ 0 := by rw [Ne]; exact hg2
