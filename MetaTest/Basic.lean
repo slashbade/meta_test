@@ -59,7 +59,7 @@ def setArgsr (stx: Syntax) (locs: List ℕ) (args: Array Syntax) : Syntax :=
 
 partial def findall (stx: Syntax) (p: Syntax → Bool) : List Syntax :=
   match stx with
-  | stx@(Syntax.node _ k args) =>
+  | stx@(Syntax.node _ _ args) =>
     (if p stx then [stx] else []) ++ args.toList.bind (findall · p)
   | _ => if p stx then [stx] else []
 
@@ -75,9 +75,38 @@ def getProofAfter (stx : Syntax) (pos: String.Pos) : Syntax := Id.run do
   for tac in tactic_seq do
     let tac_pos := tac.getPos?.getD 0
     if tac_pos > pos then
-      after_seq := after_seq.push tac
+      after_seq := (after_seq.push tac).push tac_sep
   (stx.setArgsr [1,3,1,1,0,0] after_seq)[1][3]
---   after_seq[1]!
+
+
+def getProofWithin (stx : Syntax) (pos : String.Pos) (endPos : String.Pos) : Syntax := Id.run do
+  let tactic_seq := stx[1][3][1][1][0][0].getArgs
+  let tac_sep := tactic_seq[1]!
+  let mut within_seq : Array Syntax := #[]
+  for tac in tactic_seq do
+    let tac_pos := tac.getPos?.getD 0
+    if tac_pos > pos && tac_pos <= endPos then
+      within_seq := (within_seq.push tac).push tac_sep
+  (stx.setArgsr [1,3,1,1,0,0] within_seq)[1][3]
+
+
+def pushTactic (stx : Syntax) (tac : Syntax) : Syntax := Id.run do
+  let tactic_seq := stx[1][1][0][0].getArgs
+  let tac_sep := tactic_seq[1]!
+  let new_seq := (tactic_seq.push tac).push tac_sep
+  stx.setArgsr [1,1,0,0] new_seq
+
+
+def getNearestNoGoalsPos (stx : Syntax) (pos : String.Pos) : String.Pos := Id.run do
+  let tactic_seq := stx[1][3][1][1][0][0].getArgs
+  let mut nearest_pos := 0
+  for tac in tactic_seq do
+    let tac_pos := tac.getPos?.getD 0
+    if tac_pos > pos then
+      break
+    nearest_pos := tac_pos
+  nearest_pos
+
 
 end Lean.Syntax
 
@@ -255,17 +284,15 @@ end Lean.Elab.InfoTree
 def addLine (fmt : Format) : Format :=
   if fmt.isNil then fmt else fmt ++ Format.line
 
-def Lean.Meta.ppGoalasDecl (mvarId: MVarId) : MetaM Format := do
-  match (← getMCtx).findDecl? mvarId with
-  | none          => return "unknown goal"
-  | some mvarDecl =>
+
+def Lean.Meta.ppGoalasDecl_aux (lctx : LocalContext) (linst : LocalInstances) (type : Expr) : MetaM Format := do
     let indent         := 2 -- Use option
     let showLetValues  := pp.showLetValues.get (← getOptions)
     let ppAuxDecls     := pp.auxDecls.get (← getOptions)
     let ppImplDetailHyps := pp.implementationDetailHyps.get (← getOptions)
-    let lctx           := mvarDecl.lctx
+    let lctx           := lctx
     let lctx           := lctx.sanitizeNames.run' { options := (← getOptions) }
-    withLCtx lctx mvarDecl.localInstances do
+    withLCtx lctx linst do
       -- The following two `let rec`s are being used to control the generated code size.
       -- Then should be remove after we rewrite the compiler in Lean
       let rec pushPending (ids : List Name) (type? : Option Expr) (fmt : Format) : MetaM Format := do
@@ -310,26 +337,41 @@ def Lean.Meta.ppGoalasDecl (mvarId: MVarId) : MetaM Format := do
       let fmt ← pushPending varNames type? fmt
     --   return fmt
       let fmt := addLine fmt
-      let typeFmt ← ppExpr (← instantiateMVars mvarDecl.type)
+      let typeFmt ← ppExpr (← instantiateMVars type)
+      -- let typeFmt1 := mvarDecl.type.coeTypeSet?.getD mvarDecl.type
       let fmt := fmt ++ ": " ++ Format.nest indent typeFmt
       return "lemma aug " ++ fmt
-    --   match mvarDecl.userName with
-    --   | Name.anonymous => return fmt
-    --   | name           => return "case " ++ format name.eraseMacroScopes ++ Format.line ++ fmt
+
+
+def Lean.Meta.ppGoalasDecl (mvarId: MVarId) : MetaM Format := do
+  match (← getMCtx).findDecl? mvarId with
+  | none          => return "unknown goal"
+  | some mvarDecl => return ← ppGoalasDecl_aux mvarDecl.lctx mvarDecl.localInstances mvarDecl.type
+
+
+def Lean.Meta.ppGoalStartEndasDecl (mvarId1 mvarId2 : MVarId) : MetaM Format := do
+  match (← getMCtx).findDecl? mvarId1, (← getMCtx).findDecl? mvarId2 with
+  | none, _       => return "unknown goal"
+  | (some _), none       => return "unknown goal"
+  | some mvarDec1, some mvarDec2 =>
+    let lctx := mvarDec1.lctx.mkLocalDecl (← mkFreshFVarId) `hg2 mvarDec2.type
+    return ← ppGoalasDecl_aux lctx mvarDec1.localInstances mvarDec1.type
 
 
 def Lean.Elab.ContextInfo.ppGoals_as_decl (ctx : ContextInfo) (goals : List MVarId) : IO Format :=
-    if goals.isEmpty then
-      return "no goals"
-    else
-        ctx.runMetaM {} (return Std.Format.prefixJoin "\n" (← goals.mapM (Meta.ppGoalasDecl ·)))
+  if goals.isEmpty then
+    return "no goals"
+  else
+    ctx.runMetaM {} (return Std.Format.prefixJoin "\n" (← goals.mapM (Meta.ppGoalasDecl ·)))
 
 
-
-
-
-
-
+def Lean.Elab.ContextInfo.ppGoalsStartEnd_as_decl (ctx : ContextInfo) (goalsStart goalsEnd : List MVarId) : IO Format :=
+  if goalsStart.isEmpty then
+    return "no goals"
+  else if goalsEnd.isEmpty then
+    ctx.runMetaM {} (return Std.Format.prefixJoin "\n" (← goalsStart.mapM (Meta.ppGoalasDecl ·)))
+  else
+    ctx.runMetaM {} (return ← Meta.ppGoalStartEndasDecl goalsStart.head! goalsEnd.head!)
 
 
 namespace Augmenter
@@ -370,15 +412,28 @@ elab "#info " c:command : command => do
     logInfo m!"Syntax references: {dedup_syntax stxs}"
     let trees ← getInfoTrees
     for tree in trees do
-      let fm := tree.findTacticNodes'
-      for (info, ctx, children) in fm do
-        let ctxB := { ctx with mctx := info.mctxBefore }
-        let ctxA := { ctx with mctx := info.mctxAfter }
-        let goalsBefore ← ctxB.ppGoals info.goalsBefore
-        let goalsAfter  ← ctxA.ppGoals_as_decl info.goalsAfter
-        let goalsPos := info.toElabInfo.stx.getPos?.getD 0
-        let proofAfter := c.raw.getProofAfter goalsPos
-        logInfo m!"Augmented Proof No.{goalsPos}\n{goalsAfter}{proofAfter}"
+      let tac_nodes := tree.findTacticNodes' -- Get non-duplicate tactic nodes
+      let bi_enumerator := (List.product tac_nodes.enum tac_nodes.enum).filter fun ((i, _), (j, _)) => i < j
+      logInfo m!"{tac_nodes.length}"
+      logInfo m!"{bi_enumerator.length}"
+      for ((_, infoStart, ctxStart, _), (_, infoEnd, ctxEnd, _))
+        in bi_enumerator do
+
+        let ctxB := { ctxStart with mctx := infoStart.mctxBefore }
+        let ctxA := { ctxEnd with mctx := infoEnd.mctxAfter }
+        -- let goalsBefore ← ctxB.ppGoals_as_decl infoStart.goalsBefore
+        let statement ← ctxA.ppGoalsStartEnd_as_decl infoStart.goalsBefore infoEnd.goalsAfter
+        -- let goalsAfter  ← ctxA.ppGoals_as_decl infoStart.goalsAfter
+        let goalsBPos := infoStart.toElabInfo.stx.getPos?.getD 0
+        let goalsAPos := infoEnd.toElabInfo.stx.getPos?.getD 0
+
+        -- let nearestNoGoalsPos := c.raw.getNearestNoGoalsPos goalsBPos
+        -- let proofAfter := c.raw.getProofAfter goalsBPos
+        let proofWithin := c.raw.getProofWithin goalsBPos goalsAPos
+        let added_assump := mkIdent `hg2
+        let xx ← `(tactic | exact $added_assump)
+        let proofWithin := proofWithin.pushTactic xx.raw
+        logInfo m!"Augmented Proof No.{goalsBPos}\n{statement}{proofWithin}"
         -- logInfo m!"{proofAfter}"
         -- logInfo m!"{}"
     --   logInfo m!"{← tree.format}"
@@ -391,7 +446,14 @@ elab "#info " c:command : command => do
 
 set_option pp.rawOnError true
 
-#info
+-- set_option pp.coercions false
+set_option pp.fullNames true
+set_option pp.mvars.withType true
+set_option pp.sanitizeNames false
+
+@[coe] def intToZmod (n : ℤ) : ZMod 3 := n
+
+#rwSplitter
 lemma cube_o2f_not_dvd {n : ℤ} (h : ¬ 3 ∣ n) :
     (n : ZMod 9) ^ 3 = 1 ∨ (n : ZMod 9) ^ 3 = 8 := by
   apply cube_of_castHom_ne_zero
@@ -406,6 +468,26 @@ lemma cube_o2f_not_dvd1 {n : ℤ} (h : ¬3 ∣ n) : (n : ZMod 9) ^ 3 = 1 ∨ (n 
   apply cube_of_castHom_ne_zero
   rw [map_intCast]
   rw [Ne]
+  rw [ZMod.intCast_zmod_eq_zero_iff_dvd]
+  assumption
+
+
+lemma aug (n : ℤ)
+(h : ¬3 ∣ n)
+(hg2 : ¬(n : ZMod 3) = 0)
+: (n : ZMod 3) ≠ 0 := by rw [Ne]; exact hg2
+
+
+lemma aug2 (n : ℤ)
+(h : ¬3 ∣ n)
+: (n: ZMod 3) ≠ 0 := by
+  rw [Ne]
+  rw [ZMod.intCast_zmod_eq_zero_iff_dvd]
+  assumption
+
+lemma aug3 (n : ℤ)
+(h : ¬3 ∣ n)
+: ¬(n: ZMod 3) = 0 := by
   rw [ZMod.intCast_zmod_eq_zero_iff_dvd]
   assumption
 
